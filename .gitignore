@@ -4,6 +4,9 @@
 /checkpoints/*
 /results/*
 /results_baseline/*
+/results_lora/*
+/test/*
+/hoptimus_lora/*
 
 *.ipynb_checkpoints
 *.ipynb
