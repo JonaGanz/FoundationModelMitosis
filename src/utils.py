@@ -8,6 +8,7 @@ from tqdm import tqdm
 from transformers import ViTModel
 from src import ctran
 from torchvision.models import resnet50, ResNet50_Weights
+import peft
 
 
 
@@ -194,8 +195,56 @@ def load_model_and_transforms(model_name:str):
             T.ToTensor(),
             T.Normalize(mean=(0.707223, 0.578729, 0.703617), std=(0.211883, 0.230117, 0.177517)),
         ])
+        
+    else:
+        raise ValueError(f"Model {model_name} not implemented")
+    
     return model, transforms
 
+def initialize_classification_head(model_name:str,model, num_classes:int=2):
+    
+    num_classes = 1 if num_classes == 2 else num_classes
+    
+    if model_name == 'resnet50':
+        model.fc = torch.nn.Linear(2048, num_classes)
+        
+    if model_name == 'hoptimus':
+        model.head = torch.nn.Linear(1536, num_classes)
+    
+    else:
+        raise ValueError(f"Method not implemented yet for {model_name}")
+    
+    return model
+
+
+def initialize_lora_model(model_name:str, model):
+    
+    if model_name == 'hoptimus':
+        # first create lora config
+        config = peft.LoraConfig(
+            r=16,
+            lora_alpha=16,
+            target_modules=["qkv","proj","fc1","fc2"],
+            lora_dropout=0.1,
+            bias="none",
+            modules_to_save=["head"],
+        )
+        model = peft.get_peft_model(model, config)
+        print(f"Initialized LORA model for {model_name}")
+        model.print_trainable_parameters()
+
+    else:
+        raise ValueError(f"Method not implemented yet for {model_name}")
+    
+    
+    return model
+
+def load_pretrained_lora_model(model_name:str, path:str):
+    model,_ = load_model_and_transforms(model_name)
+    model = initialize_classification_head(model_name, model)
+    # model = initialize_lora_model(model_name, model)
+    model = peft.PeftModel.from_pretrained(model, path)
+    return model
 
 def collate_fn(batch):
     """Collate function for the data loader."""

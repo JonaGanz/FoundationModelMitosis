@@ -5,10 +5,9 @@ import os
 from pathlib import Path
 from tqdm import tqdm
 from MeningiomaDataset.src.classification_dataset import Mitosis_Base_Dataset
-from src.utils import extract_patch_features_from_dataloader, load_model_and_transforms, collate_fn, return_forward
+from src.utils import extract_patch_features_from_dataloader, load_model_and_transforms, collate_fn, return_forward, initialize_classification_head, initialize_lora_model, load_pretrained_lora_model
 import torch
 import pickle
-from torchvision.models import resnet50, ResNet50_Weights
 from torch.utils.tensorboard import SummaryWriter
 from src.utils import collate_fn
 from torchvision import transforms as T
@@ -16,6 +15,7 @@ from torch.optim.lr_scheduler import OneCycleLR
 import yaml
 from torch.nn.utils import clip_grad_norm_
 import timm
+import peft
 
 BATCHE_SIZE = 16
 NUM_WORKERS = 4
@@ -26,24 +26,12 @@ PSEUDO_EPOCH_LENGTH = 1280
 LR = 1e-4
 N_EPOCHS = 100
 
-def load_model(model_name):
-    if model_name == 'resnet50':
-        model = resnet50(weights = ResNet50_Weights.DEFAULT)
-        model.fc = torch.nn.Linear(2048, 1)
-        
-    elif model_name == 'hoptimus':
-        model = timm.create_model(
-        "hf-hub:bioptimus/H-optimus-0", pretrained=True, init_values=1e-5, dynamic_img_size=False)
-        model.head = torch.nn.Linear(1536, 1)
-        
-        # freeze erverything except the head
-        for name, param in model.named_parameters():
-            if 'head' not in name:
-                param.requires_grad = False
-        
-    else:
-        raise ValueError(f"Model {model_name} not implemented")
-    
+def load_model(model_name, lora = False):
+    model,_ = load_model_and_transforms(model_name)
+    model = initialize_classification_head(model_name, model, 1)
+    if lora:
+        # lora adaptation only available for ViTs
+        model = initialize_lora_model(model_name,model)
     return model
 
 def write_args_to_yaml(args, path):
@@ -51,9 +39,15 @@ def write_args_to_yaml(args, path):
         yaml.dump(vars(args), f)
 
 class MitosisClassifier(torch.nn.Module):
-    def __init__(self, model_name = 'resnet50'):
+    def __init__(self, model_name = 'resnet50', lora:bool = False):
         super().__init__()
-        self.model = load_model(model_name)
+        self.model = load_model(model_name, lora)
+        
+    def load_pretrained_lora_model(self,model_name:str, path:str):
+        model,_ = load_model_and_transforms(model_name)
+        model = initialize_classification_head(model_name, model)
+        model = peft.PeftModel.from_pretrained(model, path)
+        self.model = model
         
     def forward(self, x):
         """Foward pass
@@ -161,9 +155,12 @@ def get_args():
     parser.add_argument('--train_sizes', type=parse_float_list, default=[0.001, 0.01, 0.1, 1.0])
     parser.add_argument('--model_name', type=str, default='resnet50')
     parser.add_argument('--augmentation', type=bool, default=True)
+    parser.add_argument('--lora', action='store_true', default=False)
     return parser.parse_args()
 
 def main(args):
+    
+    torch.set_float32_matmul_precision('medium')
     
     # loop over seeds
     for train_size in args.train_sizes:
@@ -187,7 +184,7 @@ def main(args):
             np.random.seed(seed)
             torch.manual_seed(seed)
             # load model
-            model = MitosisClassifier(args.model_name)
+            model = MitosisClassifier(args.model_name, args.lora)
             model.cuda()
             # split data into train and test
             test_indice = np.random.choice(df.index, int(len(df)*args.test_portion), replace=False)                
@@ -319,7 +316,10 @@ def main(args):
                     if val_loss < best_loss:
                         print(f"Loss improved from {best_loss} to {val_loss}, saving model and resetting trigger times")
                         best_loss = val_loss
-                        best_model = model.state_dict()
+                        if args.lora:
+                            model.model.save_pretrained(f"{out_path}/{run_idx}")
+                        else:
+                            best_model = model.state_dict()
                         trigger_times = 0
                     else:
                         trigger_times += 1
@@ -332,15 +332,25 @@ def main(args):
                     if val_loss < best_loss:
                         print(f"Loss improved from {best_loss} to {val_loss}, saving model")
                         best_loss = val_loss
-                        best_model = model.state_dict()
+                        if args.lora:
+                            model.model.save_pretrained(f"{out_path}/{run_idx}")
+                        else:
+                            best_model = model.state_dict()
                     
                 # resample training patches
                 train_loader.dataset.resample_patches()
             # save best model
-            torch.save(best_model, f"{out_path}/{run_idx}.pth")
+            if args.lora:
+                model.model.save_pretrained(f"{out_path}/{run_idx}")
+            else:    
+                torch.save(best_model, f"{out_path}/{run_idx}.pth")
             
             if best_model is not None:
-                model.load_state_dict(best_model)
+                if args.lora:
+                    model.load_pretrained_lora_model(args.model_name, f"{out_path}/{run_idx}")
+                    model.cuda()
+                else:
+                    model.load_state_dict(best_model)
         
             # Close the TensorBoard writer
             writer.close()
