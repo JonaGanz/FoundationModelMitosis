@@ -6,9 +6,9 @@ from torchvision import transforms as T
 import timm
 from tqdm import tqdm
 from transformers import ViTModel
-from src import ctran
+
 from torchvision.models import resnet50, ResNet50_Weights
-import peft
+
 
 
 
@@ -63,14 +63,24 @@ def extract_patch_features_from_dataloader(model, dataloader, forward_fn):
 
     return asset_dict
 
-def return_forward(model_name:str) -> callable:
+def return_forward(model_name: str) -> callable:
+    """
+    Returns the appropriate forward function for the given model name.
+
+    Args:
+        model_name (str): The name of the model.
+
+    Returns:
+        callable: A function that takes a model, a batch of images, and the remaining number of images,
+                  and returns the extracted embeddings.
+    """
     if model_name == 'uni':
-        def forward_fn(model,batch,remaining):
+        def forward_fn(model, batch, remaining):
             embeddings = model(batch).detach().cpu()[:remaining, :].cpu()
             return embeddings
         
     elif model_name in ['virchow', 'virchow2']:
-        def forward_fn(model,batch,remaining):
+        def forward_fn(model, batch, remaining):
             output = model(batch).detach().cpu()[:remaining, :].cpu()
             class_token = output[:, 0]
             patch_token = output[:, 1:]
@@ -78,30 +88,39 @@ def return_forward(model_name:str) -> callable:
             return embeddings
         
     elif model_name == 'phikon':
-        def forward_fn(model,batch,remaining):
+        def forward_fn(model, batch, remaining):
             embeddings = model(batch).last_hidden_state[:, 0, :].detach().cpu()[:remaining, :].cpu()
             return embeddings
         
-    elif model_name in  ['resnet50', 'gigapath', 'hoptimus']:
-        def forward_fn(model,batch,remaining):
+    elif model_name in ['resnet50', 'gigapath', 'hoptimus']:
+        def forward_fn(model, batch, remaining):
             embeddings = model(batch).detach().cpu()[:remaining, :].cpu()
             return embeddings
 
     elif model_name == 'ViT_H':
-        def forward_fn(model,batch,remaining):
+        def forward_fn(model, batch, remaining):
             output = model(batch).last_hidden_state.detach().cpu()[:remaining, :].cpu()
             class_token = output[:, 0]
             patch_token = output[:, 1:]
             embeddings = torch.cat([class_token, patch_token.mean(dim=1)], dim=-1)
             return embeddings
     
-    else :
-        raise NotImplementedError
+    else:
+        raise NotImplementedError(f"Model {model_name} not implemented")
     
     return forward_fn
 
 # initialize UNI
-def load_model_and_transforms(model_name:str):
+def load_model_and_transforms(model_name: str) -> tuple:
+    """
+    Loads the specified model and its corresponding transforms.
+
+    Args:
+        model_name (str): The name of the model to load.
+
+    Returns:
+        tuple: A tuple containing the model and the transforms.
+    """
     if model_name == 'uni':
         model = timm.create_model(
             "vit_large_patch16_224",
@@ -116,7 +135,7 @@ def load_model_and_transforms(model_name:str):
             T.Resize(224),
             T.ToTensor(),
             T.Normalize(mean=(0.485, 0.456, 0.406), std=(0.229, 0.224, 0.225)),
-            ])
+        ])
     
     elif model_name == 'virchow':
         model = timm.create_model(
@@ -138,14 +157,14 @@ def load_model_and_transforms(model_name:str):
         
     elif model_name == 'phikon':
         model = ViTModel.from_pretrained(
-        "owkin/phikon",
-        add_pooling_layer=False,
+            "owkin/phikon",
+            add_pooling_layer=False,
         )
         transforms = T.Compose([
             T.Resize(224),
             T.ToTensor(),
             T.Normalize(mean=(0.485, 0.456, 0.406), std=(0.229, 0.224, 0.225)),
-            ])
+        ])
     
     elif model_name == 'ctranspath':
         raise NotImplementedError
@@ -157,7 +176,8 @@ def load_model_and_transforms(model_name:str):
         #     T.Resize(256),
         #     T.ToTensor(),
         #     T.Normalize(mean=(0.485, 0.456, 0.406), std=(0.229, 0.224, 0.225)),
-        #     ])
+        # ])
+    
     elif model_name == 'resnet50':
         model = resnet50(weights=ResNet50_Weights.IMAGENET1K_V2)
         model.fc = torch.nn.Identity()
@@ -165,7 +185,7 @@ def load_model_and_transforms(model_name:str):
             T.Resize(224),
             T.ToTensor(),
             T.Normalize(mean=(0.485, 0.456, 0.406), std=(0.229, 0.224, 0.225)),
-            ])
+        ])
     
     elif model_name == 'ViT_H':
         model = ViTModel.from_pretrained('google/vit-huge-patch14-224-in21k')
@@ -173,23 +193,21 @@ def load_model_and_transforms(model_name:str):
         transforms = T.Compose([
             T.Resize(224),
             T.ToTensor(),
-            T.Normalize(mean=(0.5,0.5,0.5), std=(0.5,0.5,0.5)),
-            ])
+            T.Normalize(mean=(0.5, 0.5, 0.5), std=(0.5, 0.5, 0.5)),
+        ])
         
     elif model_name == 'gigapath':
         model = timm.create_model("hf_hub:prov-gigapath/prov-gigapath", pretrained=True)
         transforms = T.Compose([
             T.Resize(224, interpolation=T.InterpolationMode.BICUBIC),
             T.ToTensor(),
-            T.Normalize(mean=(0.485, 0.456, 0.406), std=(0.229, 0.224, 0.225))
-            ]
-    )
+            T.Normalize(mean=(0.485, 0.456, 0.406), std=(0.229, 0.224, 0.225)),
+        ])
         
     elif model_name == 'hoptimus':
         model = timm.create_model(
             "hf-hub:bioptimus/H-optimus-0", pretrained=True, init_values=1e-5, dynamic_img_size=False
         )
-        
         transforms = T.Compose([
             T.Resize(224, interpolation=T.InterpolationMode.BICUBIC),
             T.ToTensor(),
@@ -201,50 +219,6 @@ def load_model_and_transforms(model_name:str):
     
     return model, transforms
 
-def initialize_classification_head(model_name:str,model, num_classes:int=2):
-    
-    num_classes = 1 if num_classes == 2 else num_classes
-    
-    if model_name == 'resnet50':
-        model.fc = torch.nn.Linear(2048, num_classes)
-        
-    if model_name == 'hoptimus':
-        model.head = torch.nn.Linear(1536, num_classes)
-    
-    else:
-        raise ValueError(f"Method not implemented yet for {model_name}")
-    
-    return model
-
-
-def initialize_lora_model(model_name:str, model):
-    
-    if model_name == 'hoptimus':
-        # first create lora config
-        config = peft.LoraConfig(
-            r=16,
-            lora_alpha=16,
-            target_modules=["qkv","proj","fc1","fc2"],
-            lora_dropout=0.1,
-            bias="none",
-            modules_to_save=["head"],
-        )
-        model = peft.get_peft_model(model, config)
-        print(f"Initialized LORA model for {model_name}")
-        model.print_trainable_parameters()
-
-    else:
-        raise ValueError(f"Method not implemented yet for {model_name}")
-    
-    
-    return model
-
-def load_pretrained_lora_model(model_name:str, path:str):
-    model,_ = load_model_and_transforms(model_name)
-    model = initialize_classification_head(model_name, model)
-    # model = initialize_lora_model(model_name, model)
-    model = peft.PeftModel.from_pretrained(model, path)
-    return model
 
 def collate_fn(batch):
     """Collate function for the data loader."""
