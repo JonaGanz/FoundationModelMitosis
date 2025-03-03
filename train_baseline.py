@@ -1,21 +1,17 @@
 import pandas as pd
 import numpy as np
 import argparse
-import os
 from pathlib import Path
 from tqdm import tqdm
 from MeningiomaDataset.src.classification_dataset import Mitosis_Base_Dataset
-from src.utils import extract_patch_features_from_dataloader, load_model_and_transforms, collate_fn, return_forward, initialize_classification_head, initialize_lora_model, load_pretrained_lora_model
 import torch
-import pickle
 from torch.utils.tensorboard import SummaryWriter
 from src.utils import collate_fn
 from torchvision import transforms as T
 from torch.optim.lr_scheduler import OneCycleLR
 import yaml
 from torch.nn.utils import clip_grad_norm_
-import timm
-import peft
+from src.classifier import Classifier
 
 BATCHE_SIZE = 16
 NUM_WORKERS = 4
@@ -26,43 +22,11 @@ PSEUDO_EPOCH_LENGTH = 1280
 LR = 1e-4
 N_EPOCHS = 100
 
-def load_model(model_name, lora = False):
-    model,_ = load_model_and_transforms(model_name)
-    model = initialize_classification_head(model_name, model, 1)
-    if lora:
-        # lora adaptation only available for ViTs
-        model = initialize_lora_model(model_name,model)
-    return model
 
 def write_args_to_yaml(args, path):
     with open(path, 'w') as f:
         yaml.dump(vars(args), f)
 
-class MitosisClassifier(torch.nn.Module):
-    def __init__(self, model_name = 'resnet50', lora:bool = False):
-        super().__init__()
-        self.model = load_model(model_name, lora)
-        
-    def load_pretrained_lora_model(self,model_name:str, path:str):
-        model,_ = load_model_and_transforms(model_name)
-        model = initialize_classification_head(model_name, model)
-        model = peft.PeftModel.from_pretrained(model, path)
-        self.model = model
-        
-    def forward(self, x):
-        """Foward pass
-
-        Args:
-            x (Tensor): Tensor with shape [B, 3, W, H]
-
-        Returns:
-            Tuple[Tensor]: logits, probabilities and labels
-        """
-        logits = self.model(x)
-        logits = logits.squeeze()
-        Y_prob = torch.sigmoid(logits)
-        Y_hat = (Y_prob > 0.5).float()
-        return logits, Y_prob, Y_hat
 
 def train_one_epoch(model, optimizer, criterion, train_loader, scheduler = None, clip_grad = False):
     model.train()
@@ -74,7 +38,14 @@ def train_one_epoch(model, optimizer, criterion, train_loader, scheduler = None,
         labels = labels.cuda()
         
         optimizer.zero_grad()
-        logits, _, Y_hat = model(images) 
+        logits, _, Y_hat = model(images)
+        
+        # unsqueeze dimension is 0, otherwise the zip function will not work
+        # TODO: Look for nicer solution
+        if Y_hat.dim() == 0:
+            Y_hat = Y_hat.unsqueeze(0)
+            logits = logits.unsqueeze(0)
+        
         loss = criterion(logits, labels.float())
         if clip_grad:
             clip_grad_norm_(model.parameters(), 0.1)
@@ -99,7 +70,12 @@ def validate(model, criterion, val_loader):
             images = images.cuda()
             labels = labels.cuda()
 
-        logits, _, Y_hat = model(images) 
+        logits, _, Y_hat = model(images)
+
+        if Y_hat.dim() == 0:
+            Y_hat = Y_hat.unsqueeze(0)
+            logits = logits.unsqueeze(0)
+
         loss = criterion(logits, labels.float())        
         running_loss += loss.item()
         total += labels.size(0)
@@ -114,7 +90,14 @@ def test(model, test_loader):
         for images, labels, files, coords in tqdm(test_loader):
             images = images.cuda()
             labels = labels.cuda()
-            logits, Y_prob, Y_hat = model(images) 
+            logits, Y_prob, Y_hat = model(images)
+            
+            # unsqueeze dimension is 0, otherwise the zip function will not work
+            # TODO: Look for nicer solution
+            if Y_prob.dim() == 0:
+                print("Unsqueezing")
+                Y_prob = Y_prob.unsqueeze(0)
+                Y_hat = Y_hat.unsqueeze(0)
             
             for file, coord, label, pred, output in zip(files, coords, labels.cpu().numpy(), Y_hat.cpu().numpy(), Y_prob.cpu().numpy()):
                 results.append({
@@ -156,6 +139,7 @@ def get_args():
     parser.add_argument('--model_name', type=str, default='resnet50')
     parser.add_argument('--augmentation', type=bool, default=True)
     parser.add_argument('--lora', action='store_true', default=False)
+    parser.add_argument('--debug', action='store_true', default=False)
     return parser.parse_args()
 
 def main(args):
@@ -184,7 +168,7 @@ def main(args):
             np.random.seed(seed)
             torch.manual_seed(seed)
             # load model
-            model = MitosisClassifier(args.model_name, args.lora)
+            model = Classifier(args.model_name, args.lora)
             model.cuda()
             # split data into train and test
             test_indice = np.random.choice(df.index, int(len(df)*args.test_portion), replace=False)                
@@ -193,19 +177,6 @@ def main(args):
             # slelect training samples based on train_size
             train_indice = np.random.choice(train_df.index, int(len(train_df)*train_size), replace=False)
             train_df = train_df.loc[train_indice]
-            
-            # all_train_indice = train_df.index
-            # if args.equalize:
-            #     all_train_labels = train_df['label']
-            #     # get the positive and negative samples
-            #     positive_samples = all_train_indice[all_train_labels == 1]
-            #     negative_samples = all_train_indice[all_train_labels == 0]
-                
-            #     min_samples = min(len(positive_samples), len(negative_samples))
-            #     positive_indice = np.random.choice(positive_samples, min_samples, replace=False)
-            #     negative_samples = np.random.choice(negative_samples, min_samples, replace=False)
-            #     all_train_indice = np.concatenate([positive_indice, negative_samples])
-            #     train_df = train_df.loc[all_train_indice]
             
             # select validation data
             val_indice = np.random.choice(train_df.index, int(len(train_df)*args.test_portion), replace=False)
@@ -222,7 +193,15 @@ def main(args):
             df.loc[val_df.index, 'split'] = 'val'
             df.loc[test_df.index, 'split'] = 'test'
             
-            df.to_csv(f"{out_path}/{run_idx}_split.csv")  
+            df.to_csv(f"{out_path}/{run_idx}_split.csv")
+            
+            if args.debug:
+                # only hold 10 test samples, drop the rest, use normal df
+                test_df = df[df['split'] == 'test'].head(7)
+                df.drop(df[df['split'] == 'test'].index, inplace=True)
+                df = pd.concat([df, test_df])
+                
+            
             # initialize dataloaders
             base_ds = Mitosis_Base_Dataset(
                 csv_file=df,
