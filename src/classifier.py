@@ -235,6 +235,7 @@ class Classifier(nn.Module):
             if self.lora:
                 model = self.load_pretrained_lora_model(self.model_name, checkpoint_path)
             else:
+                model = self.model
                 model.load_state_dict(torch.load(checkpoint_path, map_location="cpu"))
             return model
         except Exception as e:
