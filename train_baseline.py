@@ -70,7 +70,7 @@ def validate(model, criterion, val_loader):
             images = images.cuda()
             labels = labels.cuda()
 
-        logits, _, Y_hat = model(images)
+            logits, _, Y_hat = model(images)
 
         if Y_hat.dim() == 0:
             Y_hat = Y_hat.unsqueeze(0)
@@ -181,8 +181,8 @@ def main(args):
             # select validation data
             val_indice = np.random.choice(train_df.index, int(len(train_df)*args.test_portion), replace=False)
             val_df = train_df.loc[val_indice]
-            train_inidice = train_df.drop(val_indice).index
-            train_df = train_df.loc[train_inidice]
+            train_indice = train_df.drop(val_indice).index
+            train_df = train_df.loc[train_indice]
             # check dfs for overlaps
             assert len(set(train_df.index).intersection(set(val_df.index))) == 0
             assert len(set(train_df.index).intersection(set(test_df.index))) == 0
@@ -320,7 +320,8 @@ def main(args):
                 train_loader.dataset.resample_patches()
             # save best model
             if args.lora:
-                model.model.save_pretrained(f"{out_path}/{run_idx}")
+                # for lora models, the best model has been saved to disc during training.
+                pass
             else:    
                 torch.save(best_model, f"{out_path}/{run_idx}.pth")
             
