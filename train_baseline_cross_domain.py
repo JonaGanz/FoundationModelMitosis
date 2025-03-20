@@ -15,6 +15,7 @@ from torchvision import transforms as T
 from torch.optim.lr_scheduler import OneCycleLR
 import yaml
 from torch.nn.utils import clip_grad_norm_
+from src.classifier import Classifier
 
 BATCHE_SIZE = 16
 NUM_WORKERS = 4
@@ -30,26 +31,26 @@ def write_args_to_yaml(args, path):
     with open(path, 'w') as f:
         yaml.dump(vars(args), f)
 
-class MitosisClassifier(torch.nn.Module):
-    def __init__(self):
-        super().__init__()
-        self.resnet = resnet50(weights = ResNet50_Weights.DEFAULT)
-        self.resnet.fc = torch.nn.Linear(2048, 1)
+# class MitosisClassifier(torch.nn.Module):
+#     def __init__(self):
+#         super().__init__()
+#         self.resnet = resnet50(weights = ResNet50_Weights.DEFAULT)
+#         self.resnet.fc = torch.nn.Linear(2048, 1)
         
-    def forward(self, x):
-        """Foward pass
+#     def forward(self, x):
+#         """Foward pass
 
-        Args:
-            x (Tensor): Tensor with shape [B, 3, W, H]
+#         Args:
+#             x (Tensor): Tensor with shape [B, 3, W, H]
 
-        Returns:
-            Tuple[Tensor]: logits, probabilities and labels
-        """
-        logits = self.resnet(x)
-        logits = logits.squeeze()
-        Y_prob = torch.sigmoid(logits)
-        Y_hat = (Y_prob > 0.5).float()
-        return logits, Y_prob, Y_hat
+#         Returns:
+#             Tuple[Tensor]: logits, probabilities and labels
+#         """
+#         logits = self.resnet(x)
+#         logits = logits.squeeze()
+#         Y_prob = torch.sigmoid(logits)
+#         Y_hat = (Y_prob > 0.5).float()
+#         return logits, Y_prob, Y_hat
 
 def train_one_epoch(model, optimizer, criterion, train_loader, scheduler = None, clip_grad = False):
     model.train()
@@ -85,8 +86,8 @@ def validate(model, criterion, val_loader):
         for images, labels in tqdm(val_loader):
             images = images.cuda()
             labels = labels.cuda()
-
-        logits, _, Y_hat = model(images) 
+            logits, _, Y_hat = model(images)
+             
         loss = criterion(logits, labels.float())        
         running_loss += loss.item()
         total += labels.size(0)
@@ -140,9 +141,15 @@ def get_args():
     parser.add_argument('--num_epochs', type=int, default=N_EPOCHS)
     parser.add_argument('--patience', type=int, default=20)
     parser.add_argument('--gradient_clipping', type=bool, default=False)
+    parser.add_argument('--lora', action='store_true', default=False)
+    parser.add_argument('--model_name', type=str, default='resnet50')
+    parser.add_argument('--debug', action='store_true', default=False)
     return parser.parse_args()
 
 def main(args):
+    
+    torch.set_float32_matmul_precision('medium')
+    
     # get tumor types
     # load the csv file
     df = pd.read_csv(args.path_to_csv_file)
@@ -155,6 +162,7 @@ def main(args):
         out_path = Path(f"{args.checkpoint_path}/{args.exp_code}/{tumor_type}")
         out_path.mkdir(parents=True, exist_ok=True)
         write_args_to_yaml(args, f"{args.checkpoint_path}/{args.exp_code}/args.yaml")
+        
         for run_idx, seed in enumerate([42,43,44,45,46]):
             print(f"##### Starting run {run_idx} with seed {seed} and tumor_type {tumor_type} #####")
             
@@ -169,7 +177,7 @@ def main(args):
             np.random.seed(seed)
             torch.manual_seed(seed)
             # load model
-            model = MitosisClassifier()
+            model = Classifier(args.model_name, args.lora)
             model.cuda()
             # select all samples of one type as training samples
             train_indice = df[df['tumortype'] == tumor_type].index
@@ -200,7 +208,14 @@ def main(args):
             df.loc[val_df.index, 'split'] = 'val'
             df.loc[test_df.index, 'split'] = 'test'
             
-            df.to_csv(f"{out_path}/{run_idx}_split.csv")  
+            df.to_csv(f"{out_path}/{run_idx}_split.csv")
+            
+            if args.debug:
+                # only hold 10 test samples, drop the rest, use normal df
+                test_df = df[df['split'] == 'test'].head(7)
+                df.drop(df[df['split'] == 'test'].index, inplace=True)
+                df = pd.concat([df, test_df])
+                  
             # initialize dataloaders
             base_ds = Mitosis_Base_Dataset(
                 csv_file=df,
@@ -296,7 +311,10 @@ def main(args):
                     if val_loss < best_loss:
                         print(f"Loss improved from {best_loss} to {val_loss}, saving model and resetting trigger times")
                         best_loss = val_loss
-                        best_model = model.state_dict()
+                        if args.lora:
+                            model.model.save_pretrained(f"{out_path}/{run_idx}")
+                        else:
+                            best_model = model.state_dict()
                         trigger_times = 0
                     else:
                         trigger_times += 1
@@ -309,15 +327,26 @@ def main(args):
                     if val_loss < best_loss:
                         print(f"Loss improved from {best_loss} to {val_loss}, saving model")
                         best_loss = val_loss
-                        best_model = model.state_dict()
+                        if args.lora:
+                            model.model.save_pretrained(f"{out_path}/{run_idx}")
+                        else:
+                            best_model = model.state_dict()
                     
                 # resample training patches
                 train_loader.dataset.resample_patches()
             # save best model
-            torch.save(best_model, f"{out_path}/{run_idx}.pth")
+            if args.lora:
+                # for lora models, the best model has been saved to disc during training.
+                pass
+            else:    
+                torch.save(best_model, f"{out_path}/{run_idx}.pth")
             
             if best_model is not None:
-                model.load_state_dict(best_model)
+                if args.lora:
+                    model.load_pretrained_lora_model(args.model_name, f"{out_path}/{run_idx}")
+                    model.cuda()
+                else:
+                    model.load_state_dict(best_model)
         
             # Close the TensorBoard writer
             writer.close()
