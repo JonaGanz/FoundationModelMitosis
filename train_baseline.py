@@ -208,19 +208,17 @@ def main(args):
                 image_dir=Path(args.image_dir),
             )
             
-            base_transform = T.Compose([
-                T.ToTensor(),
-                T.Normalize([0.485, 0.456, 0.406], [0.229, 0.224, 0.225])
-            ])
+            # load basic input transform from the model
+            base_transform = model.input_transform
             
+            # intialize train transforms, add input transforms from the model
             train_transform = T.Compose([
                 T.RandomApply([T.ColorJitter(brightness=0.1, contrast=0.1, saturation=0.1, hue=0.1)], p=0.5),
                 T.RandomApply([T.GaussianBlur(kernel_size=(5,5), sigma=(0.1, 1))], p=0.1),
                 T.RandomHorizontalFlip(p=0.5),
                 T.RandomVerticalFlip(p=0.5),
                 T.RandomApply([T.RandomRotation(degrees=360)], p=0.5),
-                T.ToTensor(),
-                T.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225])
+                *model.input_transform.transforms
             ])
                 
             

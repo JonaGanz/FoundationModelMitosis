@@ -4,6 +4,9 @@ import peft
 from .utils import load_model_and_transforms
 from transformers import ViTModel
 import os
+from typing import Tuple
+from torchvision.transforms import Compose
+import torchvision.transforms as T
 
 # Define where the LoRA adaptation can be applied for each model
 VALID_LORA_MODULES = {
@@ -96,6 +99,26 @@ class ViTForClassification(nn.Module):
         else:
             raise ValueError(f"Model {model_name} not implemented")
         return model
+    
+    @staticmethod
+    def get_transforms(model_name: str) -> Compose:
+        """
+        Get the transforms to apply to the input images.
+
+        Returns:
+            Compose: Compose object containing the transforms.
+        """
+        if model_name in ['phikon', 'ViT_H']:
+            transforms = T.Compose([
+                T.Resize(224),
+                T.ToTensor(),
+                T.Normalize(mean=(0.485, 0.456, 0.406), std=(0.229, 0.224, 0.225)),
+            ])
+            
+        else:
+            raise ValueError(f"Transforms not implemented for model: {model_name}")
+        
+        return transforms
 
 
 class Classifier(nn.Module):
@@ -112,11 +135,11 @@ class Classifier(nn.Module):
         self.model_name = model_name
         self.lora = lora
         self.num_classes = num_classes
-        self.model = self.load_model(model_name, lora, num_classes=num_classes)
+        self.model, self.input_transform = self.load_model(model_name, lora, num_classes=num_classes)
         
-    def load_model(self, model_name: str, lora: bool = False, num_classes: int = 2) -> nn.Module:
+    def load_model(self, model_name: str, lora: bool = False, num_classes: int = 2) -> Tuple[nn.Module, Compose]:
         """
-        Load a specified model for classification.
+        Load a specified model for classification and the corresponding input transforms.
         Args:
             model_name (str): The name of the model to load. Supported models include:
             "ViT_H", "phikon", "resnet50", "hoptimus", "virchow", "virchow2", "uni", "gigapath".
@@ -124,18 +147,19 @@ class Classifier(nn.Module):
             num_classes (int, optional): The number of classes for the classification task. Defaults to 2.
         Returns:
             nn.Module: The initialized model ready for classification.
+            Compose: The transforms to apply to the input images.
         Raises:
             ValueError: If the specified model_name is not implemented.
         """
         model_map = {
-            "ViT_H": lambda: ViTForClassification(model_name="ViT_H", num_classes=num_classes),
-            "phikon": lambda: ViTForClassification(model_name="phikon", num_classes=num_classes),
-            "resnet50": lambda: load_model_and_transforms("resnet50")[0],
-            "hoptimus": lambda: load_model_and_transforms("hoptimus")[0],
-            "virchow": lambda: load_model_and_transforms("virchow")[0],
-            "virchow2": lambda: load_model_and_transforms("virchow2")[0],
-            "uni": lambda: load_model_and_transforms("uni")[0],
-            "gigapath": lambda: load_model_and_transforms("gigapath")[0]
+            "ViT_H": lambda: (ViTForClassification(model_name="ViT_H", num_classes=num_classes), ViTForClassification.get_transforms("ViT_H")),
+            "phikon": lambda: (ViTForClassification(model_name="phikon", num_classes=num_classes), ViTForClassification.get_transforms("phikon")),
+            "resnet50": lambda: load_model_and_transforms("resnet50"),
+            "hoptimus": lambda: load_model_and_transforms("hoptimus"),
+            "virchow": lambda: load_model_and_transforms("virchow"),
+            "virchow2": lambda: load_model_and_transforms("virchow2"),
+            "uni": lambda: load_model_and_transforms("uni"),
+            "gigapath": lambda: load_model_and_transforms("gigapath")
         }
         
         model = model_map.get(model_name, None)
@@ -143,7 +167,7 @@ class Classifier(nn.Module):
         if model is None:
             raise ValueError(f"Model {model_name} not implemented")
         
-        model = model()
+        model, input_transforms = model()
         # Add classification head if not present for ViT models
         if model_name not in VIT_FOR_CLASSIFICATION:
             model = self.initialize_classification_head(model_name, model, num_classes)
@@ -151,7 +175,7 @@ class Classifier(nn.Module):
         if lora:
             model = self.initialize_lora_model(model_name, model)
 
-        return model
+        return model, input_transforms
         
     def initialize_lora_model(self, model_name: str, model: nn.Module) -> nn.Module:
         """

@@ -31,27 +31,6 @@ def write_args_to_yaml(args, path):
     with open(path, 'w') as f:
         yaml.dump(vars(args), f)
 
-# class MitosisClassifier(torch.nn.Module):
-#     def __init__(self):
-#         super().__init__()
-#         self.resnet = resnet50(weights = ResNet50_Weights.DEFAULT)
-#         self.resnet.fc = torch.nn.Linear(2048, 1)
-        
-#     def forward(self, x):
-#         """Foward pass
-
-#         Args:
-#             x (Tensor): Tensor with shape [B, 3, W, H]
-
-#         Returns:
-#             Tuple[Tensor]: logits, probabilities and labels
-#         """
-#         logits = self.resnet(x)
-#         logits = logits.squeeze()
-#         Y_prob = torch.sigmoid(logits)
-#         Y_hat = (Y_prob > 0.5).float()
-#         return logits, Y_prob, Y_hat
-
 def train_one_epoch(model, optimizer, criterion, train_loader, scheduler = None, clip_grad = False):
     model.train()
     running_loss = 0
@@ -222,10 +201,7 @@ def main(args):
                 image_dir=Path(args.image_dir),
             )
             
-            base_transform = T.Compose([
-                T.ToTensor(),
-                T.Normalize([0.485, 0.456, 0.406], [0.229, 0.224, 0.225])
-            ])
+            base_transform = model.input_transform
             
             train_transform = T.Compose([
                 T.RandomApply([T.ColorJitter(brightness=0.1, contrast=0.1, saturation=0.1, hue=0.1)], p=0.5),
@@ -233,8 +209,7 @@ def main(args):
                 T.RandomHorizontalFlip(p=0.5),
                 T.RandomVerticalFlip(p=0.5),
                 T.RandomApply([T.RandomRotation(degrees=360)], p=0.5),
-                T.ToTensor(),
-                T.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225])
+                *model.input_transform.transforms,
             ])
                 
             
